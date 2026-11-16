@@ -59,6 +59,7 @@ MP_ERROR=        # error message of the last failed operation
 MP_JOB=          # IBM i job name of the database connection
 declare -gA MP_JSON=()  # last response, flattened: "path" -> raw JSON token
 declare -ga MP_COLS=() MP_NUMCOLS=() MP_CELLS=() MP_NULLS=()  # columns of the last result set; rendered rows
+declare -ga MP__KEYS=()  # member name of each column in object rows (when it differs from MP_COLS)
 
 # Internal state
 MP__KIND=        # "tls", "single", or empty when disconnected
@@ -469,6 +470,11 @@ mp__ws_frame() {
     printf "$f" >&"$MP__OUT" 2>/dev/null
 }
 
+# mp__ws_frame for close frames. Servers often drop the connection right after
+# sending or answering "exit", so the pipe may already be broken. The write runs in
+# a subshell so that SIGPIPE cannot kill the script that sourced this file.
+mp__ws_frame_safe() { ( mp__ws_frame "$@" ) 2>/dev/null; }
+
 # REPLY = value of the next byte from the server
 mp__getc() {
     local LC_ALL=C c
@@ -502,7 +508,7 @@ mp__ws_recv() {
                     for ((i = 2; i < len; i++)); do reason+=${MP__HEX[pl[i]]}; done
                     printf -v reason "$reason"
                     MP__BYTES=("${pl[@]:0:2}")
-                    mp__ws_frame 8
+                    mp__ws_frame_safe 8
                     mp__close_transport
                     mp__fail "server closed the connection (code $code${reason:+: $reason})"
                     return 1 ;;
@@ -657,11 +663,15 @@ mp_connect() {
 # Send exit and shut the transport down.
 mp_close() {
     [[ -n $MP__KIND ]] || return 0
-    mp_request exit >/dev/null 2>&1
-    if [[ $MP__KIND == tls ]] && mp__alive; then
-        MP__BYTES=(3 232)   # close, status 1000 (normal)
-        mp__ws_frame 8
-    fi
+    # In a subshell: if the server has already gone away, writing to it raises
+    # SIGPIPE, which must not kill the calling script. No state from here is kept.
+    (
+        mp_request exit
+        if [[ $MP__KIND == tls ]] && mp__alive; then
+            MP__BYTES=(3 232)   # close, status 1000 (normal)
+            mp__ws_frame 8
+        fi
+    ) >/dev/null 2>&1
     mp__close_transport
     return 0
 }
@@ -710,12 +720,17 @@ mp_sqlmore() {
 # mp_sqlclose CONT_ID
 mp_sqlclose() { mp_json_str "$1"; mp_request sqlclose "\"cont_id\":$REPLY"; }
 
-# mp_cl COMMAND
+# mp_cl COMMAND -- the response data is the job log, one object per message. It
+# has no metadata, so the message columns are set up here for mp_print_result.
 mp_cl() {
     mp_json_str "$1"
-    local f="\"cmd\":$REPLY"
+    local f="\"cmd\":$REPLY" rc=0
     [[ $MP_TERSE == 1 ]] && f+=',"terse":true'
-    mp_request cl "$f"
+    mp_request cl "$f" || rc=1
+    if [[ -n ${MP_JSON[id]+x} && -z ${MP_JSON[metadata.columns.#]+x} ]]; then
+        MP_COLS=(MESSAGE_ID TYPE SEVERITY MESSAGE_TEXT) MP_NUMCOLS=(0 0 1 0) MP__KEYS=(id type severity text)
+    fi
+    return $rc
 }
 
 # mp_dove SQL [RUN(true|false)] [ROWS]
@@ -761,6 +776,7 @@ mp__columns() {
             *) MP_NUMCOLS+=(0) ;;
         esac
     done
+    MP__KEYS=("${MP_COLS[@]}")
 }
 
 # Append the rows of the array at path $1 to MP_CELLS / MP_NULLS (row-major)
@@ -771,7 +787,7 @@ mp__collect() {
     for ((r = 0; r < n; r++)); do
         for ((c = 0; c < nc; c++)); do
             k=$d.$r.$c
-            [[ -n ${MP_JSON[$k]+x} ]] || k=$d.$r.${MP_COLS[c]}
+            [[ -n ${MP_JSON[$k]+x} ]] || k=$d.$r.${MP__KEYS[c]-${MP_COLS[c]}}
             if mp_get "$k"; then MP_CELLS+=("$REPLY") MP_NULLS+=(0); else MP_CELLS+=("") MP_NULLS+=(1); fi
         done
     done
