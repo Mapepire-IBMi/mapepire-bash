@@ -155,13 +155,17 @@ connection at a time.
 ## Tests
 
 ```sh
-bash test/unit.sh          # Base64, SHA-1, JSON, rendering (no server needed)
-bash test/integration.sh   # end to end against test/mock_server.py over real TLS, plus single mode
+bash test/unit.sh          # Base64, SHA-1, JSON, rendering, WebSocket framing (no server needed)
+bash test/integration.sh   # end to end against the Mapepire mock server, over real TLS and single mode
 bash test/perf.sh          # timings for large JSON values
 ```
 
-The integration tests need `python3` and `openssl`. They use a mock server, not a
-real IBM i.
+The integration tests run against the
+[Mapepire mock server](https://github.com/Mapepire-IBMi/mapepire-mockserver), not a
+real IBM i. They need Java 8 or newer and `openssl`. On the first run, the mock
+server jar is downloaded with `curl` into `test/.cache/` and its SHA-256 is checked.
+Set `MOCK_JAR` to use a jar you already have, and `MOCK_PORT` to change the port
+(default 18076).
 
 ## License
 
